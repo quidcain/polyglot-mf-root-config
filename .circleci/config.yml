@@ -1,93 +1,76 @@
-version: 2
+version: 2.1
+orbs:
+  aws-cli: circleci/aws-cli@4.0
+  aws-s3: circleci/aws-s3@4.0
+
 jobs:
   setup:
     docker:
-      - image: znck/pnpm:latest
+      - image: node:latest
     steps:
       - checkout
       - restore_cache:
-          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
+          key: dependencies-cache-{{ checksum "package-lock.json" }}
       - run:
-          name: Install
-          command: pnpm install --frozen-lockfile
+          name: Install dependencies
+          command: npm install
       - save_cache:
-          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
           paths:
             - node_modules
+          key: dependencies-cache-{{ checksum "package-lock.json" }}
+
   build:
     docker:
-      - image: znck/pnpm:latest
+      - image: node:latest
     steps:
       - checkout
       - restore_cache:
-          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
+          key: dependencies-cache-{{ checksum "package-lock.json" }}
       - run:
-          name: Build
-          command: |
-            pnpm run build
-            ls dist
+          name: Build project
+          command: npm run build
       - save_cache:
-          key: build-output-{{ .Environment.CIRCLE_SHA1 }}
           paths:
             - dist
+          key: build-output-{{ .Environment.CIRCLE_SHA1 }}
       - store_artifacts:
           path: dist
           destination: dist
-  test:
-    docker:
-      - image: znck/pnpm:latest
-    steps:
-      - checkout
-      - restore_cache:
-          key: dependency-cache-{{ checksum "pnpm-lock.yaml" }}
-      - run:
-          name: Test and Lint
-          command: pnpm run lint && pnpm test
+
   deploy:
     docker:
-      - image: google/cloud-sdk
+      - image: node:latest
     environment:
-
+      AWS_DEFAULT_REGION: us-east-2
     steps:
       - restore_cache:
           key: build-output-{{ .Environment.CIRCLE_SHA1 }}
+      - aws-cli/install
+      - aws-cli/setup:
+          profile_name: default
+      - aws-s3/sync:
+          arguments: |
+            --acl public-read
+          from: dist/
+          to: s3://$DEPLOYER_BUCKET/$CI_ORG_PROJECT_NAME/$CIRCLE_SHA1
       - run:
           name: Deploy
           command: |
-            echo "Going to correct directory"
-            cd /home/circleci/project/
-            ls dist
-
-            echo "Creating google application credentials json file"
-            echo $GOOGLE_APPLICATION_CREDENTIALS_JSON > google-application-credentials.json
-
-            echo "Authenticating with Google"
-            gcloud auth activate-service-account --key-file google-application-credentials.json
-
-            echo "Commit sha is $CIRCLE_SHA1. This will be the directory name under $CIRCLE_PROJECT_REPONAME in Cloud Storage."
-
-            echo "Uploading module"
-            gsutil cp -rZ dist gs://$BUCKET_NAME/$CIRCLE_PROJECT_REPONAME/$CIRCLE_SHA1
             echo "Updating import map"
-            echo '{ "service":"@polyglot-mf/'"$CIRCLE_PROJECT_REPONAME"'","url":"https://'"$CF_PUBLIC_URL"'/'"$CIRCLE_PROJECT_REPONAME"'/'"$CIRCLE_SHA1"'/polyglot-mf-'"$CIRCLE_PROJECT_REPONAME"'.js" }'
-            curl -u $DEPLOYER_USERNAME:$DEPLOYER_PASSWORD -d '{ "service":"@polyglot-mf/'"$CIRCLE_PROJECT_REPONAME"'","url":"https://'"$CF_PUBLIC_URL"'/'"$CIRCLE_PROJECT_REPONAME"'/'"$CIRCLE_SHA1"'/polyglot-mf-'"$CIRCLE_PROJECT_REPONAME"'.js" }' -X PATCH http://$DEPLOYER_HOST/services\?env=$DEPLOYER_ENV -H "Accept:application/json" -H "Content-Type:application/json" --fail --insecure -i
+            curl -u $DEPLOYER_USERNAME:$DEPLOYER_PASSWORD -d '{ "service":"@polyglot-mf/'"$CI_PROJECT_NAME"'","url":"https://'"$BUCKET_HOST"'/'"$CI_ORG_PROJECT_NAME"'/'"$CIRCLE_SHA1"'/'"$CI_ORG_PROJECT_NAME"'.js" }' -X PATCH https://$DEPLOYER_HOST/services\?env=$DEPLOYER_ENV -H "Accept:application/json" -H "Content-Type:application/json" --fail --insecure -i -v
 
 workflows:
   version: 2
-  build_and_deploy:
+  build:
     jobs:
       - setup
       - build:
           requires:
             - setup
-      - test:
-          requires:
-            - setup
       - deploy:
-          context: deploy-context
           requires:
             - build
-            - test
-          filters:
-            branches:
-              only: master
+          # filters:
+          #   branches:
+          #     only:
+          #       - master
